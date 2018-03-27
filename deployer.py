@@ -2,13 +2,33 @@ import boto3
 import json
 import time
 import argparse
+import os
 
 # TODO, some of those infomration might go with env
 TEMPLATE = 'https://s3.amazonaws.com/quickstart-reference/splunk/enterprise/latest/templates/splunk-enterprise-master.template'
 PASSWORD = 'K8scicd!'
 LICENSE_BUCKET = 'pr45-k8s-ci'
 LICENSE_PATH = 'splunk-licenses/Splunk_Enterprise_NFR_Q1FY19.lic'
+
+STACK_OUTPUT_FILE = "/data/stack_output.json"
+
+# keypiar and AZ are region sepcific, we may want to add these into env
 KEYPAIR_NAME = 'pr45-k8s-ci'
+AZ_VALUES = 'us-east-1a,us-east-1b'
+
+def _get_vpc_output(name):
+    client = boto3.client('cloudformation')
+    response = client.describe_stack_resource(
+        StackName=name,
+        LogicalResourceId='VPCStack'
+    )
+
+    vpc_stack_id = response["StackResourceDetail"]["PhysicalResourceId"]
+    response = client.describe_stacks(
+        StackName=vpc_stack_id
+    )
+    vpc_output = response["Stacks"][0]["Outputs"]
+    return vpc_output
 
 def create_stack(name):
     client = boto3.client('cloudformation')
@@ -18,7 +38,7 @@ def create_stack(name):
         Parameters=[
             {
                 'ParameterKey': 'AvailabilityZones',
-                'ParameterValue': 'us-east-1a,us-east-1b'
+                'ParameterValue': AZ_VALUES
             },
             {
                 'ParameterKey': 'HECClientLocation',
@@ -111,8 +131,11 @@ def create_stack(name):
         ],
         Capabilities=[
             'CAPABILITY_IAM'
-        ]
+        ],
+        OnFailure='DO_NOTHING'
     )
+
+    result = dict()
 
     while True:
         response = client.describe_stacks(
@@ -123,8 +146,14 @@ def create_stack(name):
         if status == "CREATE_IN_PROGRESS":
             time.sleep(3)
             continue
+        # TODO check the nested stack of VPC stack
         outputs = response["Stacks"][0]["Outputs"]
-        return outputs
+        result["SplunkStack"] = outputs
+        break
+
+    vpc_output = _get_vpc_output(name)
+    result["VPCStack"] = vpc_output
+    return result
 
 
 def delete_stack(name):
@@ -145,16 +174,22 @@ def delete_stack(name):
         except:
             break
 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Splunk AWS deployment')
     parser.add_argument('op', choices=['create', 'delete'])
     parser.add_argument('--name')
+    parser.add_argument('--output')
 
     args = parser.parse_args()
+    if args.output is not None:
+        STACK_OUTPUT_FILE = args.output
+
     if args.op == "create":
-        outputs = json.dumps(create_stack(args.name))
-        print(outputs)
-        with open("/data/stack_output.json","w") as f:
-            f.write(outputs)
+        outputs_obj = create_stack(args.name)
+        outputs_str = json.dumps(outputs_obj)
+        print(outputs_str)
+        with open(STACK_OUTPUT_FILE, "w") as f:
+            f.write(outputs_str)
     elif args.op == "delete":
         delete_stack(args.name)
